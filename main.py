@@ -10,14 +10,14 @@ from tqdm import tqdm
 import torch
 from transformers import AutoTokenizer, AutoModel, AutoModelForCausalLM
 
-from llm import gptj_interface
+from llm import gptj_interface, vllm_gptj_interface
 from retriever import get_sent_embeddings, retrieve_facts
 from util import get_all_facts_cf
 
 
 def load_gptj_huggingface():
     print('Loading Huggingface GPT-J...')
-    gptj_model = AutoModelForCausalLM.from_pretrained("EleutherAI/gpt-j-6B", device_map='auto')
+    gptj_model = AutoModelForCausalLM.from_pretrained("EleutherAI/gpt-j-6B", device_map='cuda:0').eval()
     gptj_tokenizer = AutoTokenizer.from_pretrained("EleutherAI/gpt-j-6B")
     return gptj_model, gptj_tokenizer
 
@@ -34,14 +34,18 @@ def test_gptj_huggingface(gptj_model, gptj_tokenizer):
     tmp_stoppers = ['.']
 
     gptj_api = gptj_interface(gptj_tokenizer, gptj_model, tmp_stoppers, clue_config)
-    output_sents = gptj_api.call_gptj_local('Ellie Kemper is a citizen of')
-    for sent in output_sents:
-        print(sent, '\n')
+    # for ix in range(1000):
+    #     output_sents = gptj_api.call_gptj_local('Ellie Kemper is a citizen of')
+    #     for sent in output_sents:
+    #         print('[Generated Sample]\t', sent, '\n')
+    
+    # import time
+    # time.sleep(1000000)
 
 
 def load_contriever():
     print('Loading Contriever...')
-    contriever = AutoModel.from_pretrained("facebook/contriever-msmarco").cuda()
+    contriever = AutoModel.from_pretrained("facebook/contriever-msmarco").cuda(1)
     ct_tokenizer = AutoTokenizer.from_pretrained("facebook/contriever-msmarco")
     return contriever, ct_tokenizer
 
@@ -51,17 +55,24 @@ def test_contriever(contriever, ct_tokenizer, new_facts, edit_embs):
     print(new_facts[fact_ids[0]])
 
 
-def run_mello_huggingface(cf_dataset, llm_api, task_prompt, contriever, ct_tokenizer, new_facts, edit_embs, log_fn='./mello.log'):
+def mello_batch_question(q_batch, llm_api):
+    # Running mello iteration over a batch of questions
+    pass
+
+
+def run_mello(cf_dataset, llm_api, task_prompt, contriever, ct_tokenizer, new_facts, edit_embs, log_fn='./mello.log'):
     # Run mello-baseline for K=3000 (full edit space)
     if log_fn:
         fout = open(log_fn, 'a')
     else:
         fout = sys.stdout
+    
     cor, tot = 0, 0
+    #cor, tot = 339, 2829
 
     # NOTE shuffle MQUAKE-CF to fix distribution shift @~Q#1000
     random.shuffle(cf_dataset)
-    for d in tqdm(cf_dataset):
+    for d in tqdm(cf_dataset[tot:]):
         tot += 1
         for q in d["questions"]:
             found_ans = False
@@ -125,7 +136,7 @@ def run_mello_huggingface(cf_dataset, llm_api, task_prompt, contriever, ct_token
     fout.close()
 
 
-def main_huggingface():
+def main(framework):
     # Dataset loading & resolving edit statements
     with open('datasets/MQuAKE-CF-3k.json', 'r') as f:
         cf_dataset = json.load(f)
@@ -137,26 +148,42 @@ def main_huggingface():
     test_contriever(contriever, ct_tokenizer, new_facts, edit_embs)
 
     # LLM API
-    gptj_model, gptj_tokenizer = load_gptj_huggingface()
-    test_gptj_huggingface(gptj_model, gptj_tokenizer)
-
-    clue_config = {
-        'repetition_penalty' : 1.05,
-        'temperature' : 0.3,
-        'top_k' : 5,
-        'top_p' : 0.85,
-        'max_new_tokens' : 64,
-        'do_sample' : True,
-    }
     mquake_stop = ["Retrieved fact:", "Question:"]
-    gptj_api = gptj_interface(gptj_tokenizer, gptj_model, mquake_stop, clue_config)
+    if framework == 'huggingface':
+        gptj_model, gptj_tokenizer = load_gptj_huggingface()
+        test_gptj_huggingface(gptj_model, gptj_tokenizer)
+        clue_config = {
+            'repetition_penalty' : 1.05,
+            'temperature' : 0.3,
+            'top_k' : 5,
+            'top_p' : 0.85,
+            'max_new_tokens' : 64,
+            'do_sample' : True,
+        }
+        gptj_api = gptj_interface(gptj_tokenizer, gptj_model, mquake_stop, clue_config)
+        log_fn = 'mello.log'
+    
+    elif framework == 'vllm':
+        import ray
+        ray.init(num_cpus=24)
+        vllm_config = {
+            # 'repetition_penalty' : 1.05,
+            'temperature' : 0.,
+            'max_tokens' : 64,
+            'best_of' : 3,
+            'use_beam_search' : True,
+        }
+        gptj_api = vllm_gptj_interface(mquake_stop, vllm_config)
+        log_fn = 'vllm.log'
 
     # In-context demonstration
-    with open('prompts/MeLLo-prompt.txt', 'r') as f:
+    with open('prompts/MeLLo-prompt.txt', 'r', encoding='utf-8') as f:
         mello_prompt = f.read()
 
-    run_mello_huggingface(cf_dataset, gptj_api, mello_prompt, contriever, ct_tokenizer, edit_embs)
+    run_mello(cf_dataset, gptj_api, mello_prompt, contriever, ct_tokenizer, new_facts, edit_embs,
+        log_fn = log_fn,
+    )
 
 
 if __name__ == '__main__':
-    main_huggingface()
+    main(framework='vllm')
