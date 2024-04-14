@@ -91,10 +91,6 @@ class vllm_gptj_interface:
         return all_samples
 
     def call_gptj_batch(self, cur_prompt_batch):
-        try:
-            open('cur_prompt_batch.dat')
-        except:
-            torch.save(cur_prompt_batch, 'cur_prompt_batch.dat')
         llm_output_batch = self.llm.generate(cur_prompt_batch, self.sampling_config, use_tqdm=False)
         all_samples_batch = []
         for cur_prompt, llm_output in zip(cur_prompt_batch, llm_output_batch):
