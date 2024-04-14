@@ -38,3 +38,21 @@ def retrieve_facts(query, fact_embs, contriever, tok, k=1):
     knn = sim.topk(k, largest=True)
     return knn.indices
 
+
+def batch_retrieve_facts(queries, fact_embs, contriever, tok, k=1):
+    # Differed from above only in queris = [query_1, query_2,...]
+    if queries == []:
+        return []
+    contriever_device = next(iter(contriever.parameters())).device
+    inputs = tok(queries, padding=True, truncation=True, return_tensors='pt').to(contriever_device)
+    with torch.no_grad():
+        # outputs[0] ~ <BSZ, seq_len, hid_dim>
+        outputs = contriever(**inputs)
+        # query_emb ~ <BSZ, hid_dim>
+        query_emb = mean_pooling(outputs[0], inputs['attention_mask']).to(fact_embs.device)
+    # sim ~ <BSZ, num_facts>
+    sim = (query_emb @ fact_embs.T)
+    knn = sim.topk(k, largest=True)
+    # knn.indices ~ <BSZ, k> of type torch.Long
+    return knn.indices
+

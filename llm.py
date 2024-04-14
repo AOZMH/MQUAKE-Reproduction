@@ -54,6 +54,7 @@ class gptj_interface:
 
 
 ######## vLLM API ########
+import random
 import torch
 from vllm import LLM, SamplingParams
 
@@ -67,19 +68,20 @@ class vllm_gptj_interface:
             # Use all GPUs
             tensor_parallel_size = torch.cuda.device_count(),
             # tensor_parallel_size = 1,
-            gpu_memory_utilization = 0.6,
+            gpu_memory_utilization = 0.8,
+            seed = random.randint(0, 256),
         )
         self.sampling_config = SamplingParams(
-            # repetition_penalty = gen_config.get('repetition_penalty', 0.),
-            temperature = gen_config.get('temperature', 1.),
+            repetition_penalty = gen_config.get('repetition_penalty', 0.),
+            temperature = gen_config.get('temperature', 0.),
             best_of = gen_config.get('best_of', 3),
-            # n = gen_config.get('top_k', 1),
-            # top_k = gen_config.get('top_k', 1),
-            # top_p = gen_config.get('top_p', 1.),
+            # n = gen_config.get('n', 1),
+            top_k = gen_config.get('top_k', 5),
+            top_p = gen_config.get('top_p', 1.),
             max_tokens = gen_config.get('max_tokens', 32),
+            use_beam_search = gen_config.get('use_beam_search', False),
             stop = stop_words,
             include_stop_str_in_output = True,
-            use_beam_search = gen_config.get('use_beam_search', True),
         )
 
     def call_gptj_local(self, cur_prompt):
@@ -87,4 +89,15 @@ class vllm_gptj_interface:
         # For BSZ=1, directly return llm_output[0] (possibly with multi-samples)
         all_samples = [cur_prompt + out_sample.text for out_sample in llm_output[0].outputs]
         return all_samples
+
+    def call_gptj_batch(self, cur_prompt_batch):
+        try:
+            open('cur_prompt_batch.dat')
+        except:
+            torch.save(cur_prompt_batch, 'cur_prompt_batch.dat')
+        llm_output_batch = self.llm.generate(cur_prompt_batch, self.sampling_config, use_tqdm=False)
+        all_samples_batch = []
+        for cur_prompt, llm_output in zip(cur_prompt_batch, llm_output_batch):
+            all_samples_batch.append([cur_prompt + out_sample.text for out_sample in llm_output.outputs])
+        return all_samples_batch
 

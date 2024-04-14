@@ -6,13 +6,15 @@ os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
 import json
 import random
 from tqdm import tqdm
+from collections import defaultdict
 
 import torch
 from transformers import AutoTokenizer, AutoModel, AutoModelForCausalLM
 
 from llm import gptj_interface, vllm_gptj_interface
-from retriever import get_sent_embeddings, retrieve_facts
+from retriever import get_sent_embeddings, retrieve_facts, batch_retrieve_facts
 from util import get_all_facts_cf
+from mello import MelloContext
 
 
 def load_gptj_huggingface():
@@ -55,9 +57,66 @@ def test_contriever(contriever, ct_tokenizer, new_facts, edit_embs):
     print(new_facts[fact_ids[0]])
 
 
-def mello_batch_question(q_batch, llm_api):
-    # Running mello iteration over a batch of questions
-    pass
+def run_mello_batch(cf_dataset, llm_api, task_prompt, contriever, ct_tokenizer, new_facts, edit_embs, BSZ, log_fn='./mello.log'):
+    if log_fn:
+        fout = open(log_fn, 'a')
+    else:
+        fout = sys.stdout
+    str_line = '===================================================='
+    
+    all_ques, qid2ans = [], {}
+    for entry in cf_dataset:
+        all_ques.append([entry['questions'][0], entry['case_id']])
+        all_ques.append([entry['questions'][1], entry['case_id']])
+        all_ques.append([entry['questions'][2], entry['case_id']])
+        qid2ans[entry['case_id']] = set([entry['answer']] + entry['answer_alias'])
+    random.shuffle(all_ques)
+
+    pbar = tqdm(total=len(all_ques))
+    is_correct, is_complete = set(), defaultdict(lambda : 0)
+    get_complete_num = lambda is_com : len([x for x in is_com.values() if x == 3])
+    next_ix = BSZ
+    cur_batch = [MelloContext(qi[1], qi[0], task_prompt) for qi in all_ques[:BSZ]]
+
+    while cur_batch:
+        batched_inputs = [qi_obj.make_prompt() for qi_obj in cur_batch]
+        batched_outputs = llm_api.call_gptj_batch(batched_inputs)
+
+        subques_to_retrieve, new_batch = [], []
+        for qi_obj, llm_respi in zip(cur_batch, batched_outputs):
+            qi_obj.update_llm_response(llm_respi[0])
+            if qi_obj.status == 'Running':  # Need fact-retrieval & next iter
+                if qi_obj.qid not in is_correct:
+                    subques_to_retrieve.append(qi_obj.sub_qu)
+                    new_batch.append(qi_obj)    # later add retriever results to the new batch
+                else:   # early-stopped
+                    is_complete[qi_obj.qid] += 1
+                    print('[Early stopped #{}]\n{}\n{}'.format(qi_obj.qid, qi_obj.make_context_log(), str_line), file=fout, flush=True)
+
+            else:   # Ended, calculate correctness & leave room for the new batch entries
+                if qi_obj.ans in qid2ans[qi_obj.qid]:
+                    is_correct.add(qi_obj.qid)
+                is_complete[qi_obj.qid] += 1
+                print('[{} #{}]\n{}\n{}'.format(qi_obj.status, qi_obj.qid, qi_obj.make_context_log(), str_line), file=fout, flush=True)
+            
+        # Batched fact retrieval
+        fact_ids = batch_retrieve_facts(subques_to_retrieve, edit_embs, contriever, ct_tokenizer)
+        for nix, fid in enumerate(fact_ids):
+            new_batch[nix].update_retrieved_fact(new_facts[fid])
+        
+        pbar.set_postfix_str('Est. {}/{} = {}'.format(len(is_correct), next_ix//3, len(is_correct)*3 / next_ix))
+        pbar.update(len(cur_batch) - len(new_batch))
+        
+        # Complement batch
+        while len(new_batch) < BSZ and next_ix < len(all_ques):
+            new_qi = all_ques[next_ix]
+            new_batch.append(MelloContext(new_qi[1], new_qi[0], task_prompt))
+            next_ix += 1
+        cur_batch = new_batch   # Terminate if new_batch == []
+    
+    complete_num = get_complete_num(is_complete)
+    assert(complete_num == len(cf_dataset)), (is_complete, complete_num)
+    print(f'Multi-hop acc = {len(is_correct) / len(cf_dataset)} ({len(is_correct)} / {len(cf_dataset)})')
 
 
 def run_mello(cf_dataset, llm_api, task_prompt, contriever, ct_tokenizer, new_facts, edit_embs, log_fn='./mello.log'):
@@ -76,7 +135,7 @@ def run_mello(cf_dataset, llm_api, task_prompt, contriever, ct_tokenizer, new_fa
         tot += 1
         for q in d["questions"]:
             found_ans = False
-            prompt = task_prompt + "\n\nQustion: " + q
+            prompt = task_prompt + "\n\nQuestion: " + q
             print('======================================\n[Question]', q, file=fout)
             for ix in range(4):
                 # prompt the model to generate a subquestion and a tentative answer
@@ -148,7 +207,8 @@ def main(framework):
     test_contriever(contriever, ct_tokenizer, new_facts, edit_embs)
 
     # LLM API
-    mquake_stop = ["Retrieved fact:", "Question:"]
+    # mquake_stop = ["Retrieved fact:", "Question:"]
+    mquake_stop = ["Retrieved fact:", "\n\n"]
     if framework == 'huggingface':
         gptj_model, gptj_tokenizer = load_gptj_huggingface()
         test_gptj_huggingface(gptj_model, gptj_tokenizer)
@@ -167,11 +227,13 @@ def main(framework):
         import ray
         ray.init(num_cpus=24)
         vllm_config = {
-            # 'repetition_penalty' : 1.05,
-            'temperature' : 0.,
+            'repetition_penalty' : 1.05,
+            'temperature' : 0.3,
+            'top_k' : 5,
+            'top_p' : 0.85,
             'max_tokens' : 64,
             'best_of' : 3,
-            'use_beam_search' : True,
+            'use_beam_search' : False,
         }
         gptj_api = vllm_gptj_interface(mquake_stop, vllm_config)
         log_fn = 'vllm.log'
@@ -180,7 +242,11 @@ def main(framework):
     with open('prompts/MeLLo-prompt.txt', 'r', encoding='utf-8') as f:
         mello_prompt = f.read()
 
-    run_mello(cf_dataset, gptj_api, mello_prompt, contriever, ct_tokenizer, new_facts, edit_embs,
+    # run_mello(cf_dataset, gptj_api, mello_prompt, contriever, ct_tokenizer, new_facts, edit_embs,
+    #     log_fn = log_fn,
+    # )
+    run_mello_batch(cf_dataset, gptj_api, mello_prompt, contriever, ct_tokenizer, new_facts, edit_embs,
+        BSZ = 6,
         log_fn = log_fn,
     )
 
