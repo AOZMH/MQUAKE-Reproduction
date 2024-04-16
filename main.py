@@ -12,8 +12,8 @@ import torch
 from transformers import AutoTokenizer, AutoModel, AutoModelForCausalLM
 
 from llm import gptj_interface, vllm_gptj_interface
-from retriever import get_sent_embeddings, retrieve_facts, batch_retrieve_facts
-from util import get_all_facts_cf
+from retriever import get_sent_embeddings, retrieve_facts, batch_retrieve_facts, prepare_batched_edit_indices
+from util import get_all_facts_cf, split_edit_batch
 from mello import MelloContext
 
 
@@ -57,18 +57,22 @@ def test_contriever(contriever, ct_tokenizer, new_facts, edit_embs):
     print(new_facts[fact_ids[0]])
 
 
-def run_mello_batch(cf_dataset, llm_api, task_prompt, contriever, ct_tokenizer, new_facts, edit_embs, BSZ, log_fn='./mello.log'):
+def run_mello_batch(cf_dataset, llm_api, task_prompt, contriever, ct_tokenizer, new_facts, edit_embs, BSZ, edit_batch=None, log_fn='./mello.log'):
     if log_fn:
         fout = open(log_fn, 'a')
     else:
         fout = sys.stdout
     str_line = '===================================================='
     
+    # Split batches/groups of edits if necessary
+    if edit_batch:
+        split_edit_batch(cf_dataset, new_facts, BSZ=edit_batch)
+
     all_ques, qid2ans = [], {}
     for entry in cf_dataset:
-        all_ques.append([entry['questions'][0], entry['case_id']])
-        all_ques.append([entry['questions'][1], entry['case_id']])
-        all_ques.append([entry['questions'][2], entry['case_id']])
+        all_ques.append([entry['questions'][0], entry['case_id'], entry.get('edit_cand_ixs', None)])
+        all_ques.append([entry['questions'][1], entry['case_id'], entry.get('edit_cand_ixs', None)])
+        all_ques.append([entry['questions'][2], entry['case_id'], entry.get('edit_cand_ixs', None)])
         qid2ans[entry['case_id']] = set([entry['answer']] + entry['answer_alias'])
     random.shuffle(all_ques)
 
@@ -76,7 +80,8 @@ def run_mello_batch(cf_dataset, llm_api, task_prompt, contriever, ct_tokenizer, 
     is_correct, is_complete = set(), defaultdict(lambda : 0)
     get_complete_num = lambda is_com : len([x for x in is_com.values() if x == 3])
     next_ix = BSZ
-    cur_batch = [MelloContext(qi[1], qi[0], task_prompt) for qi in all_ques[:BSZ]]
+    # TODO 在构建MelloContext时加入mask，并在此前按照batch分配mask indices
+    cur_batch = [MelloContext(qi[1], qi[0], task_prompt, qi[2]) for qi in all_ques[:BSZ]]
 
     while cur_batch:
         batched_inputs = [qi_obj.make_prompt() for qi_obj in cur_batch]
@@ -100,7 +105,8 @@ def run_mello_batch(cf_dataset, llm_api, task_prompt, contriever, ct_tokenizer, 
                 print('[{} #{}]\n{}\n{}'.format(qi_obj.status, qi_obj.qid, qi_obj.make_context_log(), str_line), file=fout, flush=True)
             
         # Batched fact retrieval
-        fact_ids = batch_retrieve_facts(subques_to_retrieve, edit_embs, contriever, ct_tokenizer)
+        edit_indices = prepare_batched_edit_indices(new_batch) if edit_batch else None
+        fact_ids = batch_retrieve_facts(subques_to_retrieve, edit_embs, contriever, ct_tokenizer, edit_indices=edit_indices)
         for nix, fid in enumerate(fact_ids):
             new_batch[nix].update_retrieved_fact(new_facts[fid])
         
@@ -110,7 +116,7 @@ def run_mello_batch(cf_dataset, llm_api, task_prompt, contriever, ct_tokenizer, 
         # Complement batch
         while len(new_batch) < BSZ and next_ix < len(all_ques):
             new_qi = all_ques[next_ix]
-            new_batch.append(MelloContext(new_qi[1], new_qi[0], task_prompt))
+            new_batch.append(MelloContext(new_qi[1], new_qi[0], task_prompt, new_qi[2]))
             next_ix += 1
         cur_batch = new_batch   # Terminate if new_batch == []
     
@@ -195,6 +201,7 @@ def run_mello(cf_dataset, llm_api, task_prompt, contriever, ct_tokenizer, new_fa
     fout.close()
 
 
+
 def main(framework):
     # Dataset loading & resolving edit statements
     with open('datasets/MQuAKE-CF-3k.json', 'r') as f:
@@ -236,7 +243,7 @@ def main(framework):
             'use_beam_search' : False,
         }
         gptj_api = vllm_gptj_interface(mquake_stop, vllm_config)
-        log_fn = 'vllm.log'
+        log_fn = 'vllm_dup.log'
 
     # In-context demonstration
     with open('prompts/MeLLo-prompt.txt', 'r', encoding='utf-8') as f:
@@ -246,7 +253,8 @@ def main(framework):
     #     log_fn = log_fn,
     # )
     run_mello_batch(cf_dataset, gptj_api, mello_prompt, contriever, ct_tokenizer, new_facts, edit_embs,
-        BSZ = 6,
+        BSZ = 12,
+        edit_batch = 100,
         log_fn = log_fn,
     )
 

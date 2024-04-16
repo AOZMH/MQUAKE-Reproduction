@@ -39,7 +39,18 @@ def retrieve_facts(query, fact_embs, contriever, tok, k=1):
     return knn.indices
 
 
-def batch_retrieve_facts(queries, fact_embs, contriever, tok, k=1):
+def prepare_batched_edit_indices(new_batch,):
+    # Return 2-d tensor indices [[0,0,...,1,1,...,], [2,5,...,10,12,...]]
+    # To be index-ed over sim ~ <BSZ, num_facts>
+    sim_indices = [[], []]
+    for batch_ix, batch_obj in enumerate(new_batch):
+        sim_indices[0] += [batch_ix] * len(batch_obj.edit_cand_ixs)
+        sim_indices[1] += batch_obj.edit_cand_ixs
+    #     print(batch_obj.qid, batch_obj.qu, [new_facts[eix] for eix in batch_obj.edit_cand_ixs], '\n')
+    return sim_indices
+
+
+def batch_retrieve_facts(queries, fact_embs, contriever, tok, k=1, edit_indices=None):
     # Differed from above only in queris = [query_1, query_2,...]
     if queries == []:
         return []
@@ -52,6 +63,12 @@ def batch_retrieve_facts(queries, fact_embs, contriever, tok, k=1):
         query_emb = mean_pooling(outputs[0], inputs['attention_mask']).to(fact_embs.device)
     # sim ~ <BSZ, num_facts>
     sim = (query_emb @ fact_embs.T)
+    # Batched mello: restrict candidate space
+    if edit_indices:
+        # TODO 这里要取个反
+        msk = torch.ones_like(sim).bool()
+        msk[edit_indices] = False
+        sim[msk] = -torch.inf
     knn = sim.topk(k, largest=True)
     # knn.indices ~ <BSZ, k> of type torch.Long
     return knn.indices

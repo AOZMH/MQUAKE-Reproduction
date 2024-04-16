@@ -3,10 +3,11 @@ import sys
 
 class MelloContext:
 
-    def __init__(self, qid, question, task_prompt, total_iters=4,):
+    def __init__(self, qid, question, task_prompt, edit_cand_ixs, total_iters=4,):
         self.qid = qid
         self.qu = question.strip()
         self.tp = task_prompt.strip()
+        self.edit_cand_ixs = edit_cand_ixs
         self.context = ''   # Active context after question
         self.left_iters = total_iters   # Max iteration
         self.status = 'Running'
