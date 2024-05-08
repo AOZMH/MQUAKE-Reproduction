@@ -2,6 +2,7 @@ import sys
 import os
 #os.chdir('../MQuAKE/')
 os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
+os.environ['TRANSFORMERS_CACHE'] = '/data/'
 
 import json
 import random
@@ -122,7 +123,7 @@ def run_mello_batch(cf_dataset, llm_api, task_prompt, contriever, ct_tokenizer, 
     
     complete_num = get_complete_num(is_complete)
     assert(complete_num == len(cf_dataset)), (is_complete, complete_num)
-    print(f'Multi-hop acc = {len(is_correct) / len(cf_dataset)} ({len(is_correct)} / {len(cf_dataset)})')
+    print(f'Multi-hop acc = {len(is_correct) / len(cf_dataset)} ({len(is_correct)} / {len(cf_dataset)})', file=fout, flush=True)
 
 
 def run_mello(cf_dataset, llm_api, task_prompt, contriever, ct_tokenizer, new_facts, edit_embs, log_fn='./mello.log'):
@@ -234,16 +235,16 @@ def main(framework):
         import ray
         ray.init(num_cpus=24)
         vllm_config = {
+            'max_tokens' : 64,
             'repetition_penalty' : 1.05,
             'temperature' : 0.3,
             'top_k' : 5,
             'top_p' : 0.85,
-            'max_tokens' : 64,
             'best_of' : 3,
             'use_beam_search' : False,
         }
         gptj_api = vllm_gptj_interface(mquake_stop, vllm_config)
-        log_fn = 'vllm_dup.log'
+        log_fn = 'llama2_13b_BSZ_1.log'
 
     # In-context demonstration
     with open('prompts/MeLLo-prompt.txt', 'r', encoding='utf-8') as f:

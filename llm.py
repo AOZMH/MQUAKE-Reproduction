@@ -62,8 +62,10 @@ from vllm import LLM, SamplingParams
 class vllm_gptj_interface:
     def __init__(self, stop_words, gen_config={}):
         self.llm = LLM(
-            model = "EleutherAI/gpt-j-6B",
-            tokenizer = "EleutherAI/gpt-j-6B",
+            # model = "EleutherAI/gpt-j-6B",
+            # tokenizer = "EleutherAI/gpt-j-6B",
+            model = "/data/Llama-2-13b-chat-hf",
+            tokenizer = "/data/Llama-2-13b-chat-hf",
             # dtype = 'float32',
             # Use all GPUs
             tensor_parallel_size = torch.cuda.device_count(),
