@@ -235,7 +235,7 @@ def main(framework):
         import ray
         ray.init(num_cpus=24)
         vllm_config = {
-            'max_tokens' : 64,
+            'max_tokens' : 100,     # align with Zexuan's sample, previously 64
             'repetition_penalty' : 1.05,
             'temperature' : 0.3,
             'top_k' : 5,
@@ -244,18 +244,23 @@ def main(framework):
             'use_beam_search' : False,
         }
         gptj_api = vllm_gptj_interface(mquake_stop, vllm_config)
-        log_fn = 'llama2_13b_BSZ_1.log'
 
     # In-context demonstration
-    with open('prompts/MeLLo-prompt.txt', 'r', encoding='utf-8') as f:
-        mello_prompt = f.read()
+    Mello_BSZ = 1   # Batch size for mello
+    log_fn = 'llama2_13b_BSZ_1_corr_prompt.log'
+    if Mello_BSZ == 1:
+        with open('prompts/MeLLo-prompt_bsz1.txt', 'r', encoding='utf-8') as f:
+            mello_prompt = f.read()
+    else:
+        with open('prompts/MeLLo-prompt.txt', 'r', encoding='utf-8') as f:
+            mello_prompt = f.read()
 
     # run_mello(cf_dataset, gptj_api, mello_prompt, contriever, ct_tokenizer, new_facts, edit_embs,
     #     log_fn = log_fn,
     # )
     run_mello_batch(cf_dataset, gptj_api, mello_prompt, contriever, ct_tokenizer, new_facts, edit_embs,
         BSZ = 12,
-        edit_batch = 100,
+        edit_batch = Mello_BSZ,
         log_fn = log_fn,
     )
 
